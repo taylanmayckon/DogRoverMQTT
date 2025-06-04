@@ -150,8 +150,10 @@ typedef struct {
 #define ERROR_printf printf
 #endif
 
-// Temporização da coleta de temperatura - how often to measure our temperature
-#define TEMP_WORKER_TIME_S 10
+// Temporização da publicação de cada tópico pelo RP2040 (quantos segundos entre cada envio no tópico)
+#define TEMPERATURE_WORKER_TIME_S 10 // Temperatura
+#define BATTERY_WORKER_TIME_S 10 // Bateria
+#define COLLECT_WORKER_TIME_S 10 // Coletas
 
 // Manter o programa ativo - keep alive in seconds
 #define MQTT_KEEP_ALIVE_S 60
@@ -194,6 +196,12 @@ static void control_led(MQTT_CLIENT_DATA_T *state, bool on);
 // Publicar temperatura
 static void publish_temperature(MQTT_CLIENT_DATA_T *state);
 
+// Publicar bateria
+static void publish_battery(MQTT_CLIENT_DATA_T *state);
+
+// Publicar materiais coletados
+static void publish_collect(MQTT_CLIENT_DATA_T *state);
+
 // Requisição de Assinatura - subscribe
 static void sub_request_cb(void *arg, err_t err);
 
@@ -212,6 +220,14 @@ static void mqtt_incoming_publish_cb(void *arg, const char *topic, u32_t tot_len
 // Publicar temperatura
 static void temperature_worker_fn(async_context_t *context, async_at_time_worker_t *worker);
 static async_at_time_worker_t temperature_worker = { .do_work = temperature_worker_fn };
+
+// Publicar porcentagem de bateria
+static void battery_worker_fn(async_context_t *context, async_at_time_worker_t *worker);
+static async_at_time_worker_t battery_worker = { .do_work = battery_worker_fn };
+
+// Publicar quantidade de coletas
+static void collect_worker_fn(async_context_t *context, async_at_time_worker_t *worker);
+static async_at_time_worker_t collect_worker = { .do_work = collect_worker_fn };
 
 // Conexão MQTT
 static void mqtt_connection_cb(mqtt_client_t *client, void *arg, mqtt_connection_status_t status);
@@ -787,11 +803,41 @@ static void publish_temperature(MQTT_CLIENT_DATA_T *state) {
     float temperature = robot_temperature;
     if (temperature != old_temperature) {
         old_temperature = temperature;
-        // Publish temperature on /temperature topic
+        // Publica no tópico /temperature
         char temp_str[16];
         snprintf(temp_str, sizeof(temp_str), "%.2f", temperature);
         INFO_printf("Publishing %s to %s\n", temp_str, temperature_key);
         mqtt_publish(state->mqtt_client_inst, temperature_key, temp_str, strlen(temp_str), MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_request_cb, state);
+    }
+}
+
+// Publicar bateria
+static void publish_battery(MQTT_CLIENT_DATA_T *state){
+    static float old_battery;
+    const char *battery_key = full_topic(state, "/battery");
+    float battery = rover.battery;
+    if(battery != old_battery){
+        old_battery = battery;
+        // Publica no tópico /battery
+        char bat_str[16];
+        snprintf(bat_str, sizeof(bat_str), "%.2f", battery);
+        INFO_printf("Publishing %s to %s\n", bat_str, battery_key);
+        mqtt_publish(state->mqtt_client_inst, battery_key, bat_str, strlen(bat_str), MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_request_cb, state);
+    }
+}
+
+// Publicar coletas
+static void publish_collect(MQTT_CLIENT_DATA_T *state){
+    static int old_collect;
+    const char *collect_key = full_topic(state, "/collect");
+    int collect = rover.collects;
+    if(collect != old_collect){
+        old_collect = collect;
+        // Publica no tópico /battery
+        char col_str[16];
+        snprintf(col_str, sizeof(col_str), "%d", collect);
+        INFO_printf("Publishing %s to %s\n", col_str, collect_key);
+        mqtt_publish(state->mqtt_client_inst, collect_key, col_str, strlen(col_str), MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_request_cb, state);
     }
 }
 
@@ -873,7 +919,21 @@ static void mqtt_incoming_publish_cb(void *arg, const char *topic, u32_t tot_len
 static void temperature_worker_fn(async_context_t *context, async_at_time_worker_t *worker) {
     MQTT_CLIENT_DATA_T* state = (MQTT_CLIENT_DATA_T*)worker->user_data;
     publish_temperature(state);
-    async_context_add_at_time_worker_in_ms(context, worker, TEMP_WORKER_TIME_S * 1000);
+    async_context_add_at_time_worker_in_ms(context, worker, TEMPERATURE_WORKER_TIME_S * 1000);
+}
+
+// Publicar bateria
+static void battery_worker_fn(async_context_t *context, async_at_time_worker_t *worker){
+    MQTT_CLIENT_DATA_T* state = (MQTT_CLIENT_DATA_T*)worker->user_data;
+    publish_battery(state);
+    async_context_add_at_time_worker_in_ms(context, worker, BATTERY_WORKER_TIME_S * 1000);
+}
+
+// Publicar coletas
+static void collect_worker_fn(async_context_t *context, async_at_time_worker_t *worker){
+    MQTT_CLIENT_DATA_T* state = (MQTT_CLIENT_DATA_T*)worker->user_data;
+    publish_collect(state);
+    async_context_add_at_time_worker_in_ms(context, worker, COLLECT_WORKER_TIME_S * 1000);
 }
 
 // Conexão MQTT
@@ -888,9 +948,18 @@ static void mqtt_connection_cb(mqtt_client_t *client, void *arg, mqtt_connection
             mqtt_publish(state->mqtt_client_inst, state->mqtt_client_info.will_topic, "1", 1, MQTT_WILL_QOS, true, pub_request_cb, state);
         }
 
-        // Publish temperature every 10 sec if it's changed
+        // Publica a temperatura
         temperature_worker.user_data = state;
         async_context_add_at_time_worker_in_ms(cyw43_arch_async_context(), &temperature_worker, 0);
+
+        // Publica a bateria
+        battery_worker.user_data = state;
+        async_context_add_at_time_worker_in_ms(cyw43_arch_async_context(), &battery_worker, 0);
+
+        // Publica as coletas
+        collect_worker.user_data = state;
+        async_context_add_at_time_worker_in_ms(cyw43_arch_async_context(), &collect_worker, 0);
+
     } else if (status == MQTT_CONNECT_DISCONNECTED) {
         if (!state->connect_done) {
             panic("Failed to connect to mqtt server");
