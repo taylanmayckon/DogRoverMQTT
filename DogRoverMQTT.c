@@ -7,6 +7,8 @@
 #include "FreeRTOS.h"
 #include "FreeRTOSConfig.h"
 #include "task.h"
+#include "semphr.h"
+#include "queue.h"
 
 #include <string.h>              // Biblioteca manipular strings
 #include <stdlib.h>              // funções para realizar várias operações, incluindo alocação de memória dinâmica (malloc)
@@ -57,6 +59,9 @@
 #define I2C_SCL 15
 #define endereco 0x3C
 
+// Mutex para leitura do ADC
+SemaphoreHandle_t xADCmutex; // Mutex 
+
 // Variáveis da PIO declaradas no escopo global
 PIO pio;
 uint sm;
@@ -74,7 +79,7 @@ typedef struct {
     float battery;
     bool alert_obstacle;
     bool alert_collect;
-    bool web;
+    bool mqtt;
 } Rover;
 
 // Iniciando o rover centralizado e com tudo zerado
@@ -177,9 +182,6 @@ typedef struct {
  * raspberry-pi-pico-c-sdk.pdf, Section '4.1.1. hardware_adc'
  * pico-examples/adc/adc_console/adc_console.c */
 
-//Leitura de temperatura do microcotrolador
-static float read_onboard_temperature(const char unit);
-
 // Requisição para publicar
 static void pub_request_cb(__unused void *arg, err_t err);
 
@@ -274,15 +276,71 @@ void gpio_led_bitdog(void){
     gpio_put(LED_RED_PIN, false);
 }
 
+// Define a movimentação com base no servidor MQTT
+void mqttMoveInput(MQTT_CLIENT_DATA_T *state){
+    int initial_pos = rover.position; // Armazena a posição inicial do rover
+    grid[rover.position] = CELL_FREE; // Prepara o grid para o movimento
+
+    DEBUG_printf("[mqttMoveInput] %s\n", state->data);
+
+    // Botão para cima
+    if(lwip_stricmp((const char *)state->data, "up") == 0){
+        if(rover.position>=5 && rover.mqtt){ // Restringe a posição para a anterior, caso o movimento vá além do permitido
+            rover.position-=5;
+        }
+        else{
+            rover.alert_obstacle=true;
+        }
+    }
+    // Botão para baixo
+    else if(lwip_stricmp((const char *)state->data, "down") == 0){
+        if(rover.position<=19 && rover.mqtt){ // Restringe a posição para a anterior, caso o movimento vá além do permitido
+            rover.position+=5;
+        }
+        else{
+            rover.alert_obstacle=true;
+        }
+    }
+    // Botão para esquerda
+    else if(lwip_stricmp((const char *)state->data, "left") == 0){
+        // Quando permite o movimento
+        if(rover.position % 5 != 0 && rover.mqtt){
+            rover.position--;
+        }
+        // Movimento invalido
+        else{
+            rover.alert_obstacle = true;
+        }
+    }
+    // Botão para direita
+    else if(lwip_stricmp((const char *)state->data, "right") == 0){
+        // Quando permite o movimento
+        if(rover.position % 5 != 4 && rover.mqtt){
+            rover.position++;
+        }
+        // Movimento invalido
+        else{
+            rover.alert_obstacle = true;
+        }
+    }
+
+    if(grid[rover.position] == CELL_COLLECT){ // Incrementa caso tenha sido feita uma coleta
+        rover.collects++;
+        rover.alert_collect=true;
+    }
+
+    if(grid[rover.position] == CELL_OBSTACLE){ // Gera alerta e trava o rover caso tenha obstaculo no destino
+        rover.position = initial_pos;
+        rover.alert_obstacle=true;
+    }
+
+    grid[rover.position] = CELL_PLAYER; // Atualiza o GRID com a nova posição do player
+}
+
 // =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 // -> Tasks do FreeRTOS
 void vMQTT_HandlerTask(void *params){
     INFO_printf("[MQTT Client] Inicializando\n");
-
-    // Inicializa o conversor ADC
-    adc_init();
-    adc_set_temp_sensor_enabled(true);
-    adc_select_input(4);
 
     // Cria registro com os dados do cliente
     static MQTT_CLIENT_DATA_T state;
@@ -451,8 +509,8 @@ void vDisplayOLEDTask(){
         ssd1306_draw_string(&ssd, converted_string, 76, 16, false);
         // Modo
         ssd1306_draw_string(&ssd, "MODO: ", 4, 28, false);
-        if(rover.web == true){
-            ssd1306_draw_string(&ssd, "WEB", 52, 28, false);
+        if(rover.mqtt){
+            ssd1306_draw_string(&ssd, "MQTT", 52, 28, false);
         }
         else{
             ssd1306_draw_string(&ssd, "BITDOGLAB", 52, 28, false);
@@ -534,18 +592,25 @@ void vBitDogLabModeTask(){
 
     int initial_pos;
 
+    uint16_t vrx_value;
+    uint16_t vry_value;
+
     while(true){
-        // Leitura do Eixo X (Canal 1)
-        adc_select_input(1);
-        uint16_t vrx_value = adc_read();
-        // Leitura do Eixo Y (Canal 0)
-        adc_select_input(0);
-        uint16_t vry_value = adc_read();
+        // Caso não esteja no modo do mqtt server
+        if(!rover.mqtt){
+            if(xSemaphoreTake(xADCmutex, portMAX_DELAY) == pdTRUE){ // Verifica se consegue usar o ADC
+                // Leitura do Eixo X (Canal 1)
+                adc_select_input(1);
+                vrx_value = adc_read();
+                // Leitura do Eixo Y (Canal 0)
+                adc_select_input(0);
+                vry_value = adc_read();
 
-        initial_pos = rover.position; // Armazena a posição inicial
+                xSemaphoreGive(xADCmutex); // Libera o Mutex do ADC
+            }
 
-        // Caso não esteja no modo do web server
-        if(!rover.web){
+            initial_pos = rover.position; // Armazena a posição inicial
+
             grid[rover.position] = CELL_FREE; // Prepara o grid para o movimento
 
             // Direita
@@ -603,6 +668,27 @@ void vBitDogLabModeTask(){
     }
 }
 
+// Task para leitura da temperatura
+float robot_temperature; // Temperatura definida globalmente
+
+void vReadTemperatureTask(){
+    adc_set_temp_sensor_enabled(true);
+
+    while(true){
+        // Proteção de Mutex para o ADC
+        if(xSemaphoreTake(xADCmutex, portMAX_DELAY) == pdTRUE){
+            adc_select_input(4);
+            const float conversionFactor = 3.3f / (1 << 12);
+
+            float adc = (float)adc_read() * conversionFactor;
+            robot_temperature = 27.0f - (adc - 0.706f) / 0.001721f;
+            xSemaphoreGive(xADCmutex); // Liberando o mutex
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
 void vLedRGBTask(){
     // Inicializando os pinos do Led RGB como PWM
     set_pwm(LED_BLUE_PIN, wrap);
@@ -634,16 +720,25 @@ void vLedRGBTask(){
     }
 }
 
+// =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+// -> Função main
 int main(void) {
-
     // Inicializa todos os tipos de bibliotecas stdio padrão presentes que estão ligados ao binário.
     stdio_init_all();
+
+    // Inicializa o conversor ADC
+    adc_init();
+
+    // Inicializa o Mutex para leitura do ADC
+    xADCmutex = xSemaphoreCreateMutex();
+
     xTaskCreate(vMQTT_HandlerTask, "MQTT Handler Task", configMINIMAL_STACK_SIZE, NULL, 10, NULL); // Prioridade mais alta
     xTaskCreate(vLedMatrixTask, "Led Matrix Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY, NULL);
     xTaskCreate(vDisplayOLEDTask, "Display OLED Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY, NULL); 
     xTaskCreate(vBuzzerTask, "Buzzer Alert Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY, NULL);
     xTaskCreate(vBatteryDropTask, "Battery Drop Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY, NULL);
     xTaskCreate(vBitDogLabModeTask, "BitDogLab Mode Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY, NULL);
+    xTaskCreate(vReadTemperatureTask, "Read Temperature Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY, NULL);
     xTaskCreate(vLedRGBTask, "Led RGB Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY, NULL);
 
     vTaskStartScheduler();
@@ -655,23 +750,6 @@ int main(void) {
 /* References for this implementation:
  * raspberry-pi-pico-c-sdk.pdf, Section '4.1.1. hardware_adc'
  * pico-examples/adc/adc_console/adc_console.c */
-static float read_onboard_temperature(const char unit) {
-
-    /* 12-bit conversion, assume max value == ADC_VREF == 3.3 V */
-    const float conversionFactor = 3.3f / (1 << 12);
-
-    float adc = (float)adc_read() * conversionFactor;
-    float tempC = 27.0f - (adc - 0.706f) / 0.001721f;
-
-    if (unit == 'C' || unit != 'F') {
-        return tempC;
-    } else if (unit == 'F') {
-        return tempC * 9 / 5 + 32;
-    }
-
-    return -1.0f;
-}
-
 // Requisição para publicar
 static void pub_request_cb(__unused void *arg, err_t err) {
     if (err != 0) {
@@ -706,7 +784,7 @@ static void control_led(MQTT_CLIENT_DATA_T *state, bool on) {
 static void publish_temperature(MQTT_CLIENT_DATA_T *state) {
     static float old_temperature;
     const char *temperature_key = full_topic(state, "/temperature");
-    float temperature = read_onboard_temperature(TEMPERATURE_UNITS);
+    float temperature = robot_temperature;
     if (temperature != old_temperature) {
         old_temperature = temperature;
         // Publish temperature on /temperature topic
@@ -744,8 +822,8 @@ static void unsub_request_cb(void *arg, err_t err) {
 // Tópicos de assinatura
 static void sub_unsub_topics(MQTT_CLIENT_DATA_T* state, bool sub) {
     mqtt_request_cb_t cb = sub ? sub_request_cb : unsub_request_cb;
-    mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/led"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
-    mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/print"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
+    mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/mqtt_mode"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
+    mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/movement"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
     mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/ping"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
     mqtt_sub_unsub(state->mqtt_client_inst, full_topic(state, "/exit"), MQTT_SUBSCRIBE_QOS, cb, state, sub);
 }
@@ -763,14 +841,16 @@ static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t f
     state->data[len] = '\0';
 
     DEBUG_printf("Topic: %s, Message: %s\n", state->topic, state->data);
-    if (strcmp(basic_topic, "/led") == 0){
+
+    // Ações com base nas leituras dos tópicos MQTT
+    if (strcmp(basic_topic, "/mqtt_mode") == 0){
         if (lwip_stricmp((const char *)state->data, "On") == 0 || strcmp((const char *)state->data, "1") == 0)
-            control_led(state, true);
+            rover.mqtt = true;
         else if (lwip_stricmp((const char *)state->data, "Off") == 0 || strcmp((const char *)state->data, "0") == 0)
-            control_led(state, false);
+            rover.mqtt = false;
 
     } else if (strcmp(basic_topic, "/movement") == 0) {
-        INFO_printf("%.*s\n", len, data);
+        mqttMoveInput(state);
 
     } else if (strcmp(basic_topic, "/ping") == 0) {
         char buf[11];
