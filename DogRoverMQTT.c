@@ -29,11 +29,11 @@
 #include "font.h"
 
 // Constantes para o Wi-Fi e MQTT
-#define WIFI_SSID "Jr telecom _ Taylan"                  // Substitua pelo nome da sua rede Wi-Fi
-#define WIFI_PASSWORD "Suta3021"      // Substitua pela senha da sua rede Wi-Fi
-#define MQTT_SERVER "192.168.18.4"                // Substitua pelo endereço do host - broket MQTT: Ex: 192.168.1.107
-#define MQTT_USERNAME "taylanmayckon"     // Substitua pelo nome da host MQTT - Username
-#define MQTT_PASSWORD "embarcatech"     // Substitua pelo Password da host MQTT - credencial de acesso - caso exista
+#define WIFI_SSID "SSID"                  // Substitua pelo nome da sua rede Wi-Fi
+#define WIFI_PASSWORD "PASSWORD"      // Substitua pela senha da sua rede Wi-Fi
+#define MQTT_SERVER "BROKER MQTT"                // Substitua pelo endereço do host - broket MQTT: Ex: 192.168.1.107
+#define MQTT_USERNAME "USERNAME"     // Substitua pelo nome da host MQTT - Username
+#define MQTT_PASSWORD "PASSWORD"     // Substitua pelo Password da host MQTT - credencial de acesso - caso exista
 
 // Definição dos pinos dos LEDs
 #define LED_PIN CYW43_WL_GPIO_LED_PIN   // GPIO do CI CYW43
