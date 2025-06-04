@@ -190,9 +190,6 @@ static void pub_request_cb(__unused void *arg, err_t err);
 // Topico MQTT
 static const char *full_topic(MQTT_CLIENT_DATA_T *state, const char *name);
 
-// Controle do LED 
-static void control_led(MQTT_CLIENT_DATA_T *state, bool on);
-
 // Publicar temperatura
 static void publish_temperature(MQTT_CLIENT_DATA_T *state);
 
@@ -782,18 +779,6 @@ static const char *full_topic(MQTT_CLIENT_DATA_T *state, const char *name) {
 #else
     return name;
 #endif
-}
-
-// Controle do LED 
-static void control_led(MQTT_CLIENT_DATA_T *state, bool on) {
-    // Publish state on /state topic and on/off led board
-    const char* message = on ? "On" : "Off";
-    if (on)
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
-    else
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
-
-    mqtt_publish(state->mqtt_client_inst, full_topic(state, "/led/state"), message, strlen(message), MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_request_cb, state);
 }
 
 // Publicar temperatura
