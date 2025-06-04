@@ -27,11 +27,75 @@
 #include "font.h"
 
 // Constantes para o Wi-Fi e MQTT
-#define WIFI_SSID "SEU_SSID"                  // Substitua pelo nome da sua rede Wi-Fi
-#define WIFI_PASSWORD "SEU_PASSORD_WIFI"      // Substitua pela senha da sua rede Wi-Fi
-#define MQTT_SERVER "SEU_HOST"                // Substitua pelo endereço do host - broket MQTT: Ex: 192.168.1.107
-#define MQTT_USERNAME "SEU_USERNAME_MQTT"     // Substitua pelo nome da host MQTT - Username
-#define MQTT_PASSWORD "SEU_PASSWORD_MQTT"     // Substitua pelo Password da host MQTT - credencial de acesso - caso exista
+#define WIFI_SSID "Jr telecom _ Taylan"                  // Substitua pelo nome da sua rede Wi-Fi
+#define WIFI_PASSWORD "Suta3021"      // Substitua pela senha da sua rede Wi-Fi
+#define MQTT_SERVER "192.168.18.4"                // Substitua pelo endereço do host - broket MQTT: Ex: 192.168.1.107
+#define MQTT_USERNAME "taylanmayckon"     // Substitua pelo nome da host MQTT - Username
+#define MQTT_PASSWORD "embarcatech"     // Substitua pelo Password da host MQTT - credencial de acesso - caso exista
+
+// Definição dos pinos dos LEDs
+#define LED_PIN CYW43_WL_GPIO_LED_PIN   // GPIO do CI CYW43
+#define LED_BLUE_PIN 12                 // GPIO12 - LED azul
+#define LED_GREEN_PIN 11                // GPIO11 - LED verde
+#define LED_RED_PIN 13                  // GPIO13 - LED vermelho
+
+// Buzzers
+#define BUZZER_A 21 
+#define BUZZER_B 10
+
+// Analogicos
+#define JOYSTICK_X 27
+#define JOYSTICK_Y 26
+
+// Constantes para a matriz de leds
+#define IS_RGBW false
+#define LED_MATRIX_PIN 7
+
+// Definições da I2C
+#define I2C_PORT i2c1
+#define I2C_SDA 14
+#define I2C_SCL 15
+#define endereco 0x3C
+
+// Variáveis da PIO declaradas no escopo global
+PIO pio;
+uint sm;
+// Booleano para o display
+bool cor = true;
+
+// Variáveis do PWM (setado para freq. de 312,5 Hz)
+uint wrap = 2000;
+uint clkdiv = 25;
+
+// Para descrever o rover
+typedef struct {
+    int position;
+    int collects;
+    float battery;
+    bool alert_obstacle;
+    bool alert_collect;
+    bool web;
+} Rover;
+
+// Iniciando o rover centralizado e com tudo zerado
+Rover rover = {12, 0, 100.00, false, false, true};
+
+Led_frame led_matrix; // Matriz para gerar as cores
+
+typedef enum{ // Tipos de célula
+    CELL_FREE,
+    CELL_OBSTACLE,
+    CELL_PLAYER,
+    CELL_COLLECT
+} Celltype;
+
+Celltype grid[NUM_PIXELS] = { // Grid com o conteúdo de cada célula (LED)
+    CELL_FREE, CELL_FREE, CELL_OBSTACLE, CELL_OBSTACLE, CELL_FREE,
+    CELL_FREE, CELL_FREE, CELL_FREE,     CELL_FREE,     CELL_FREE,
+    CELL_FREE, CELL_FREE,  CELL_PLAYER,  CELL_FREE,     CELL_FREE,
+    CELL_FREE, CELL_OBSTACLE, CELL_FREE, CELL_COLLECT,  CELL_FREE,
+    CELL_COLLECT, CELL_FREE, CELL_FREE,  CELL_OBSTACLE, CELL_FREE
+};
 
 // Definição da escala de temperatura
 #ifndef TEMPERATURE_UNITS
@@ -156,11 +220,64 @@ static void start_client(MQTT_CLIENT_DATA_T *state);
 // Call back com o resultado do DNS
 static void dns_found(const char *hostname, const ip_addr_t *ipaddr, void *arg);
 
-int main(void) {
+// =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+// -> FUNÇÕES AUXILIARES
+// String para armazenar o tempo restante do semáforo
+char converted_num; // Armazena um dígito
+char converted_string[3]; // Armazena o número convertido (2 dígitos)
+// Função que converte int para char
+void int_2_char(int num, char *out){
+    *out = '0' + num;
+}
 
-    // Inicializa todos os tipos de bibliotecas stdio padrão presentes que estão ligados ao binário.
-    stdio_init_all();
-    INFO_printf("mqtt client starting\n");
+void int_2_string(int num){
+    if(num<9){ // Gera string para as menores que 10
+        int_2_char(num, &converted_num); // Converte o dígito à direita do número para char
+        converted_string[0] = '0'; // Char para melhorar o visual
+        converted_string[1] = converted_num; // Int convertido para char
+        converted_string[2] = '\0'; // Terminador nulo da String 
+    }
+    else{ // Gera a string para as maiores/iguais que 10
+        int divider = num/10; // Obtém as dezenas
+        int_2_char(divider, &converted_num);
+        converted_string[0] = converted_num;
+
+        int_2_char(num%10, &converted_num); // Obtém a parte das unidades
+        converted_string[1] = converted_num; // Int convertido para char
+        converted_string[2] = '\0'; // Terminador nulo da String
+    }
+}
+
+// Função para configurar o PWM e iniciar com 0% de DC
+void set_pwm(uint gpio, uint wrap){
+    gpio_set_function(gpio, GPIO_FUNC_PWM);
+    uint slice_num = pwm_gpio_to_slice_num(gpio);
+    pwm_set_clkdiv(slice_num, clkdiv);
+    pwm_set_wrap(slice_num, wrap);
+    pwm_set_enabled(slice_num, true); 
+    pwm_set_gpio_level(gpio, 0);
+}
+
+// Inicializar os Pinos GPIO para acionamento dos LEDs da BitDogLab
+void gpio_led_bitdog(void){
+    // Configuração dos LEDs como saída
+    gpio_init(LED_BLUE_PIN);
+    gpio_set_dir(LED_BLUE_PIN, GPIO_OUT);
+    gpio_put(LED_BLUE_PIN, false);
+    
+    gpio_init(LED_GREEN_PIN);
+    gpio_set_dir(LED_GREEN_PIN, GPIO_OUT);
+    gpio_put(LED_GREEN_PIN, false);
+    
+    gpio_init(LED_RED_PIN);
+    gpio_set_dir(LED_RED_PIN, GPIO_OUT);
+    gpio_put(LED_RED_PIN, false);
+}
+
+// =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+// -> Tasks do FreeRTOS
+void vMQTT_HandlerTask(void *params){
+    INFO_printf("[MQTT Client] Inicializando\n");
 
     // Inicializa o conversor ADC
     adc_init();
@@ -248,8 +365,292 @@ int main(void) {
     }
 
     INFO_printf("mqtt client exiting\n");
-    return 0;
+    return;
 }
+
+// Task para controlar a matriz de LEDs endereçáveis
+// Função para atualizar a matriz de LEDs com as cores do grid
+void update_led_matrix_from_grid(){
+    Led_color green = {0, 255, 0};
+    Led_color blue = {0, 0, 255};
+    Led_color orange = {255, 165, 0};
+    Led_color off = {0, 0, 0};
+
+    for (int i = 0; i < NUM_PIXELS; i++) {
+        switch (grid[i]) {
+            case CELL_FREE:
+                led_matrix.led[i] = off;
+                break;
+            case CELL_OBSTACLE:
+                led_matrix.led[i] = orange;
+                break;
+            case CELL_PLAYER:
+                led_matrix.led[i] = green;
+                break;
+            case CELL_COLLECT:
+                led_matrix.led[i] = blue;
+                break;
+        }
+    }
+}
+
+void vLedMatrixTask(){
+    // Inicializando a PIO
+    pio = pio0;
+    sm = 0;
+    uint offset = pio_add_program(pio, &ws2812_program);
+    ws2812_program_init(pio, sm, offset, LED_MATRIX_PIN, 800000, IS_RGBW);
+
+    float matrix_intensity;
+
+    Led_color green = {0, 255, 0};
+    Led_color blue = {0, 0, 255};
+    Led_color orange = {255, 165, 0};
+    Led_color off = {0, 0, 0};
+
+    while(true){
+        // Atualiza as cores na matriz RGB
+        update_led_matrix_from_grid();
+
+        // Envia para a matriz física da BitDogLab
+        matrix_update_leds(&led_matrix, 0.01);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+
+// Task para controlar o display OLED
+void vDisplayOLEDTask(){
+    // Configurando a I2C
+    i2c_init(I2C_PORT, 400 * 1000);
+
+    gpio_set_function(I2C_SDA, GPIO_FUNC_I2C);                    // Set the GPIO pin function to I2C
+    gpio_set_function(I2C_SCL, GPIO_FUNC_I2C);                    // Set the GPIO pin function to I2C
+    gpio_pull_up(I2C_SDA);                                        // Pull up the data line
+    gpio_pull_up(I2C_SCL);                                        // Pull up the clock line
+    ssd1306_t ssd;                                                // Inicializa a estrutura do display
+    ssd1306_init(&ssd, WIDTH, HEIGHT, false, endereco, I2C_PORT); // Inicializa o display
+    ssd1306_config(&ssd);                                         // Configura o display
+    ssd1306_send_data(&ssd);                                      // Envia os dados para o display
+    // Limpa o display. O display inicia com todos os pixels apagados.
+    ssd1306_fill(&ssd, false);
+    ssd1306_send_data(&ssd);
+
+    while(true){
+        ssd1306_fill(&ssd, false); // Limpa o display
+
+        // Frame que será reutilizado para todos
+        ssd1306_rect(&ssd, 0, 0, 128, 64, cor, !cor);
+        // Nome superior
+        ssd1306_rect(&ssd, 0, 0, 128, 12, cor, cor); // Fundo preenchido
+        ssd1306_draw_string(&ssd, "DogRover", 4, 3, true); // String: Semaforo
+        ssd1306_draw_string(&ssd, "TM", 107, 3, true);
+        // Bateria
+        int_2_string((int)rover.battery);
+        ssd1306_draw_string(&ssd, "BATERIA: ", 4, 16, false);
+        ssd1306_draw_string(&ssd, converted_string, 76, 16, false);
+        // Modo
+        ssd1306_draw_string(&ssd, "MODO: ", 4, 28, false);
+        if(rover.web == true){
+            ssd1306_draw_string(&ssd, "WEB", 52, 28, false);
+        }
+        else{
+            ssd1306_draw_string(&ssd, "BITDOGLAB", 52, 28, false);
+        }
+        // Coletas
+        int_2_string(rover.collects);
+        ssd1306_draw_string(&ssd, "COLETAS: ", 4, 40, false);
+        ssd1306_draw_string(&ssd, converted_string, 76, 40, false);
+
+        ssd1306_send_data(&ssd); // Envia os dados para o display, atualizando o mesmo
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+// Task para os alertas sonoros
+void vBuzzerTask(){
+    set_pwm(BUZZER_A, wrap);
+    set_pwm(BUZZER_B, wrap);
+
+    int buzzer_obstacle_count = 0;
+    int buzzer_collect_count = 0;
+
+    while(true){
+        // Alerta de obstáculo
+        if(rover.alert_obstacle){
+            if(buzzer_obstacle_count%2==0){
+                pwm_set_gpio_level(BUZZER_A, wrap*0.05);
+                pwm_set_gpio_level(BUZZER_B, wrap*0.05);
+            }
+            else{
+                pwm_set_gpio_level(BUZZER_A, 0);
+                pwm_set_gpio_level(BUZZER_B, 0);
+            }
+            buzzer_obstacle_count++;
+
+            if(buzzer_obstacle_count==4){ // Condição que para o alerta sonoro
+                buzzer_obstacle_count=0;
+                rover.alert_obstacle=false;
+            }
+        }
+
+        // Alerta de coleta
+        else if(rover.alert_collect){
+            if(buzzer_collect_count<4 || buzzer_collect_count%2==0){
+                pwm_set_gpio_level(BUZZER_A, wrap*0.05);
+                pwm_set_gpio_level(BUZZER_B, wrap*0.05);
+            }
+            else{
+                pwm_set_gpio_level(BUZZER_A, 0);
+                pwm_set_gpio_level(BUZZER_B, 0);
+            }
+            buzzer_collect_count++;
+            
+            if(buzzer_collect_count==8){
+                buzzer_collect_count=0;
+                rover.alert_collect=false;
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50)); // Pequeno delay para reduzir o consumo de CPU
+          
+    }
+}
+
+// Task para decair a bateria
+void vBatteryDropTask(){
+    while(true){
+        rover.battery-=0.1;
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
+// Task para controle manual
+void vBitDogLabModeTask(){
+    // Configurando o ADC
+    adc_init();
+    adc_gpio_init(JOYSTICK_X); // Canal 1
+    adc_gpio_init(JOYSTICK_Y); // Canal 0
+
+    int initial_pos;
+
+    while(true){
+        // Leitura do Eixo X (Canal 1)
+        adc_select_input(1);
+        uint16_t vrx_value = adc_read();
+        // Leitura do Eixo Y (Canal 0)
+        adc_select_input(0);
+        uint16_t vry_value = adc_read();
+
+        initial_pos = rover.position; // Armazena a posição inicial
+
+        // Caso não esteja no modo do web server
+        if(!rover.web){
+            grid[rover.position] = CELL_FREE; // Prepara o grid para o movimento
+
+            // Direita
+            if(vrx_value>3500){
+                if(rover.position % 5 != 4){ // Quando permite o movimento
+                    rover.position++;
+                }
+                else{ // Movimento invalido
+                    rover.alert_obstacle = true;
+                }
+            }
+            // Esquerda
+            else if(vrx_value<500){
+                if(rover.position % 5 != 0){ // Quando permite o movimento
+                    rover.position--;
+                }
+                else{ // Movimento invalido
+                    rover.alert_obstacle = true;
+                }
+            }
+
+            // Cima
+            if(vry_value>3500){
+                if(rover.position>=5){ // Quando permite o movimento
+                    rover.position-=5;
+                }
+                else{ // Movimento invalido
+                    rover.alert_obstacle = true;
+                }
+            }
+            // Baixo
+            else if(vry_value<500){
+                if(rover.position<=19){ // Quando permite o movimento
+                    rover.position+=5;
+                }
+                else{ // Movimento invalido
+                    rover.alert_obstacle=true;
+                }
+            }
+
+            if(grid[rover.position] == CELL_COLLECT){ // Incrementa caso tenha sido feita uma coleta
+                rover.collects++;
+                rover.alert_collect=true;
+            }
+
+            if(grid[rover.position] == CELL_OBSTACLE){ // Gera alerta e trava o rover caso tenha obstaculo no destino
+                rover.position = initial_pos;
+                rover.alert_obstacle=true;
+            }
+
+            grid[rover.position] = CELL_PLAYER; // Atualiza o GRID com a nova posição do player
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
+void vLedRGBTask(){
+    // Inicializando os pinos do Led RGB como PWM
+    set_pwm(LED_BLUE_PIN, wrap);
+    set_pwm(LED_RED_PIN, wrap);
+    set_pwm(LED_GREEN_PIN, wrap);
+
+    int led_obstacle_count = 0;
+
+    while(true){
+        // Aumenta a intensidade do LED azul conforme a bateria descarrega
+        pwm_set_gpio_level(LED_BLUE_PIN, wrap*(1-(rover.battery/100))/4);
+
+        // Pisca o led nos alertas
+        if(rover.alert_obstacle){
+            pwm_set_gpio_level(LED_RED_PIN, wrap*0.05);
+            pwm_set_gpio_level(LED_GREEN_PIN, wrap*0.05);
+            vTaskDelay(pdMS_TO_TICKS(50));
+            pwm_set_gpio_level(LED_RED_PIN, 0);
+            pwm_set_gpio_level(LED_GREEN_PIN, 0);
+            vTaskDelay(pdMS_TO_TICKS(50));
+            pwm_set_gpio_level(LED_RED_PIN, wrap*0.05);
+            pwm_set_gpio_level(LED_GREEN_PIN, wrap*0.05);
+            vTaskDelay(pdMS_TO_TICKS(50));
+            pwm_set_gpio_level(LED_RED_PIN, 0);
+            pwm_set_gpio_level(LED_GREEN_PIN, 0);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+int main(void) {
+
+    // Inicializa todos os tipos de bibliotecas stdio padrão presentes que estão ligados ao binário.
+    stdio_init_all();
+    xTaskCreate(vMQTT_HandlerTask, "MQTT Handler Task", configMINIMAL_STACK_SIZE, NULL, 10, NULL); // Prioridade mais alta
+    xTaskCreate(vLedMatrixTask, "Led Matrix Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY, NULL);
+    xTaskCreate(vDisplayOLEDTask, "Display OLED Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY, NULL); 
+    xTaskCreate(vBuzzerTask, "Buzzer Alert Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY, NULL);
+    xTaskCreate(vBatteryDropTask, "Battery Drop Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY, NULL);
+    xTaskCreate(vBitDogLabModeTask, "BitDogLab Mode Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY, NULL);
+    xTaskCreate(vLedRGBTask, "Led RGB Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY, NULL);
+
+    vTaskStartScheduler();
+    panic_unsupported();
+}
+
+
 
 /* References for this implementation:
  * raspberry-pi-pico-c-sdk.pdf, Section '4.1.1. hardware_adc'
@@ -362,18 +763,20 @@ static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t f
     state->data[len] = '\0';
 
     DEBUG_printf("Topic: %s, Message: %s\n", state->topic, state->data);
-    if (strcmp(basic_topic, "/led") == 0)
-    {
+    if (strcmp(basic_topic, "/led") == 0){
         if (lwip_stricmp((const char *)state->data, "On") == 0 || strcmp((const char *)state->data, "1") == 0)
             control_led(state, true);
         else if (lwip_stricmp((const char *)state->data, "Off") == 0 || strcmp((const char *)state->data, "0") == 0)
             control_led(state, false);
-    } else if (strcmp(basic_topic, "/print") == 0) {
+
+    } else if (strcmp(basic_topic, "/movement") == 0) {
         INFO_printf("%.*s\n", len, data);
+
     } else if (strcmp(basic_topic, "/ping") == 0) {
         char buf[11];
         snprintf(buf, sizeof(buf), "%u", to_ms_since_boot(get_absolute_time()) / 1000);
         mqtt_publish(state->mqtt_client_inst, full_topic(state, "/uptime"), buf, strlen(buf), MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_request_cb, state);
+
     } else if (strcmp(basic_topic, "/exit") == 0) {
         state->stop_client = true; // stop the client when ALL subscriptions are stopped
         sub_unsub_topics(state, false); // unsubscribe
